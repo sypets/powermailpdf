@@ -7,6 +7,7 @@ use In2code\Powermail\Controller\FormController;
 use In2code\Powermail\Domain\Model\Answer;
 use In2code\Powermail\Domain\Model\Field;
 use In2code\Powermail\Domain\Model\Mail;
+use Psr\Log\LoggerInterface;
 use TYPO3\CMS\Core\Error\Exception;
 use TYPO3\CMS\Core\Resource\File;
 use TYPO3\CMS\Core\Resource\Folder;
@@ -33,7 +34,8 @@ final class CreateActionBeforeRenderView
 
     protected ?bool $encoding = null;
 
-    public function __construct(ResourceFactory $resourceFactory, StandaloneView $standaloneView)
+    public function __construct(ResourceFactory $resourceFactory, StandaloneView $standaloneView,
+        private readonly LoggerInterface $logger)
     {
         $this->resourceFactory = $resourceFactory;
         $this->standaloneView = $standaloneView;
@@ -52,6 +54,8 @@ final class CreateActionBeforeRenderView
 
         /** @var Folder $folder */
         $folder = $this->resourceFactory->getFolderObjectFromCombinedIdentifier($settings['target.']['pdf']);
+
+        $this->logger->debug('generatePdf: BEGIN, folder=' . $folder->getStorage()->getUid() . ':' . $folder->getIdentifier());
 
         // Include \FPDM library from phar file, if not included already (e.g. composer installation)
         if (!class_exists('\FPDM')) {
@@ -75,6 +79,8 @@ final class CreateActionBeforeRenderView
         $pdfOriginal = GeneralUtility::getFileAbsFileName($GLOBALS['TYPO3_REQUEST']->getAttribute('frontend.typoscript')->getSetupArray()['plugin.']['tx_powermailpdf.']['settings.']['sourceFile']);
 
         if (!empty($pdfOriginal)) {
+            $this->logger->debug('generatePdf: original PDF (sourceFile) =<' . $pdfOriginal . '>');
+            
             $pdfFlatTempFile = (string) null;
             $info = pathinfo($pdfOriginal);
             $pdfFilename = basename($pdfOriginal, '.' . $info['extension']) . '_';
@@ -88,28 +94,47 @@ final class CreateActionBeforeRenderView
             if (isset($settings['flatten']) && isset($settings['flattenTool'])) {
                 $pdfFlatTempFile = GeneralUtility::tempnam($pdfFilename, '.pdf');
                 $tempFile = GeneralUtility::tempnam($pdfFilename, '.pdf');
+                $this->logger->debug(sprintf('generatePdf: flatten: pdfFlatTempFile=<%s> tempFile=<%s>', $pdfFlatTempFile, $tempFile));
                 switch ($settings['flattenTool']) {
                     case 'gs':
                         // Flatten PDF with ghostscript
-                        @shell_exec("gs -sDEVICE=pdfwrite -dSubsetFonts=false -dPDFSETTINGS=/default -dNOPAUSE -dBATCH -sOutputFile=" . $pdfFlatTempFile . " " . $pdfTempFile);
+                        $exec = "gs -sDEVICE=pdfwrite -dSubsetFonts=false -dPDFSETTINGS=/default -dNOPAUSE -dBATCH -sOutputFile=" . $pdfFlatTempFile . " " . $pdfTempFile;
+                        $this->logger->debug('generatePdf: flatten PDF with ghostscript: ' . $exec);
+                        @shell_exec($exec);
                         break;
                     case 'pdftocairo':
                         // Flatten PDF with pdftocairo
-                        @shell_exec('pdftocairo -pdf ' . $pdfTempFile . ' ' . $pdfFlatTempFile);
+                        $exec = 'pdftocairo -pdf ' . $pdfTempFile . ' ' . $pdfFlatTempFile;
+                        $this->logger->debug('generatePdf: flatten PDF with pdftocairo: ' . $exec);
+                        @shell_exec($exec);
                         break;
                     case 'pdftk':
                         // Flatten PDF with pdftk
-                        @shell_exec('pdftk ' . $pdfTempFile . ' generate_fdf output ' . $tempFile);
-                        @shell_exec('pdftk ' . $pdfTempFile . ' fill_form ' . $tempFile . ' output ' . $pdfFlatTempFile . ' flatten');
+                        $exec = 'pdftk ' . $pdfTempFile . ' generate_fdf output ' . $tempFile;
+                        $this->logger->debug('generatePdf: flatten PDF with pdftk (1): ' . $exec);
+                        @shell_exec($exec);
+
+                        $exec = 'pdftk ' . $pdfTempFile . ' fill_form ' . $tempFile . ' output ' . $pdfFlatTempFile . ' flatten';
+                        $this->logger->debug('generatePdf: flatten PDF with pdftk (2): ' . $exec);
+                        @shell_exec($exec);
                         break;
                 }
+            } else {
+                $this->logger->debug('generatePdf: Do not flatten');
             }
         } else {
             throw new Exception("No pdf file is set in Typoscript. Please set tx_powermailpdf.settings.sourceFile if you want to use the filling feature.", 1417432239);
         }
 
         if (file_exists($pdfFlatTempFile)) {
+            $this->logger->debug('generatePdf: flat temp file exists, return' . $pdfFlatTempFile);
             return $folder->addFile($pdfFlatTempFile);
+        }
+
+        if (file_exists($pdfTempFile)) {
+            $this->logger->debug('generatePdf: No pdfFlatTempFile but pdfTempFile exists (ok) <' . $pdfTempFile . '>');
+        } else {
+            $this->logger->error('generatePdf: No pdfFlatTempFile and not pdfTempFile exists, should not happen!');
         }
 
         return $folder->addFile($pdfTempFile);
